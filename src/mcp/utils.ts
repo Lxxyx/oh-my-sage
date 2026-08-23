@@ -246,6 +246,61 @@ export function formatGraphListMarkdown(graphs: Array<{
 }
 
 /**
+ * 格式化设备引用扫描结果为 Markdown
+ */
+export function formatDeviceUsageMarkdown(report: {
+  devices: Array<{
+    did: string;
+    name: string;
+    found: boolean;
+    nodeCount: number;
+    graphs: Array<{
+      graphId: string;
+      name: string;
+      enable: boolean;
+      nodes: Array<{ nodeId: string; nodeType: string; role: string; target: string }>;
+    }>;
+  }>;
+  orphans: Array<{ did: string; graphs: string[] }>;
+  scannedGraphs: number;
+  unreadableGraphs: string[];
+}): string {
+  const ROLE_LABEL: Record<string, string> = { trigger: "触发", read: "读取", write: "控制" };
+  const lines = ["## 设备引用扫描", "", `扫描规则: ${report.scannedGraphs} 条`, ""];
+
+  for (const device of report.devices) {
+    lines.push(`### ${device.name} (${device.did})`);
+    if (!device.found) lines.push("- ⚠️ 该设备已不在网关设备表中");
+    if (device.graphs.length === 0) {
+      lines.push("- 没有任何规则引用此设备", "");
+      continue;
+    }
+    lines.push(`- 命中 ${device.graphs.length} 条规则，共 ${device.nodeCount} 个节点`, "");
+    for (const graph of device.graphs) {
+      lines.push(`- **${graph.name}** (${graph.graphId}) ${graph.enable ? "✅ 已启用" : "❌ 已禁用"}`);
+      for (const node of graph.nodes) {
+        lines.push(`  - ${node.nodeId} · ${node.nodeType} · ${ROLE_LABEL[node.role] || node.role} · ${node.target}`);
+      }
+    }
+    lines.push("");
+  }
+
+  if (report.orphans.length > 0) {
+    lines.push("### ⚠️ 残留引用（设备已删除但规则仍在引用）");
+    for (const orphan of report.orphans) {
+      lines.push(`- ${orphan.did} → ${orphan.graphs.join(", ")}`);
+    }
+    lines.push("");
+  }
+
+  if (report.unreadableGraphs.length > 0) {
+    lines.push("### ⚠️ 读取失败的规则（引用情况未知）", `- ${report.unreadableGraphs.join(", ")}`, "");
+  }
+
+  return lines.join("\n");
+}
+
+/**
  * 格式化变量列表为 Markdown
  */
 export function formatVariableListMarkdown(

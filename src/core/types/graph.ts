@@ -68,3 +68,41 @@ export interface ValidationError {
     level: 'error' | 'warn';
     message: string;
 }
+
+/** 设备在某个节点上的使用方式 */
+export interface DeviceUsageNode {
+    nodeId: string;
+    nodeType: string;
+    /** trigger=被订阅触发, read=被读取判断, write=被写入控制 */
+    role: 'trigger' | 'read' | 'write';
+    /** 命中的 MIOT 定位，如 "siid=2 piid=1" */
+    target: string;
+}
+
+/** 单条规则中对某设备的引用 */
+export interface DeviceUsageGraph {
+    graphId: string;
+    name: string;
+    enable: boolean;
+    nodes: DeviceUsageNode[];
+}
+
+/** 单个设备的引用汇总 */
+export interface DeviceUsage {
+    did: string;
+    name: string;
+    /** 该 did 是否存在于网关设备表；false 表示设备已被删除但规则仍在引用 */
+    found: boolean;
+    nodeCount: number;
+    graphs: DeviceUsageGraph[];
+}
+
+/** 设备引用扫描报告 */
+export interface DeviceUsageReport {
+    devices: DeviceUsage[];
+    /** 规则引用了但网关设备表中已不存在的 did */
+    orphans: Array<{ did: string; graphs: string[] }>;
+    scannedGraphs: number;
+    /** 读取失败的规则，其引用情况未知 */
+    unreadableGraphs: string[];
+}
