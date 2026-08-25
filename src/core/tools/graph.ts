@@ -4,7 +4,8 @@
 
 import { GatewayClient } from '../gateway/client';
 import { randomInt } from 'node:crypto';
-import type { Graph, GraphSummary, CreateGraphInput, UpdateGraphInput, ValidationError } from '../types/graph';
+import type { Graph, GraphNode, GraphSummary, CreateGraphInput, UpdateGraphInput, ValidationError, DeviceUsageNode, DeviceUsageReport, DeviceUsage } from '../types/graph';
+import type { DeviceListResponse } from '../types/device';
 import type { ToolResponse } from '../types';
 import { validateGraph, layoutNodes } from './base';
 import { validateGraphCapabilitiesWithGateway } from './capabilityValidation';
@@ -345,3 +346,113 @@ export async function toggleGraph(gateway: GatewayClient, id: string, enable: bo
         return { success: false, error: `切换规则状态失败: ${error}` };
     }
 }
+
+// ==================== 设备引用扫描 ====================
+
+/** 会携带 did 的节点类型 → 该设备在节点中扮演的角色 */
+const DEVICE_NODE_ROLES: Record<string, DeviceUsageNode['role']> = {
+    deviceInput: 'trigger',
+    deviceInputSetVar: 'trigger',
+    deviceGet: 'read',
+    deviceGetSetVar: 'read',
+    deviceOutput: 'write',
+};
+
+function nodeTarget(props: GraphNode['props']): string {
+    const parts = (['siid', 'piid', 'eiid', 'aiid'] as const)
+        .filter((key) => typeof props[key] === 'number')
+        .map((key) => `${key}=${String(props[key])}`);
+    return parts.join(' ') || '-';
+}
+
+/**
+ * 扫描全部规则，找出引用了指定设备的规则与节点。
+ * 传入的 did 即使已从网关设备表中删除也会照常扫描，用于排查残留引用。
+ * 需要逐条拉取规则，规则较多时耗时数秒。
+ */
+export async function findDeviceUsage(
+    gateway: GatewayClient,
+    input: { dids?: string[]; query?: string }
+): Promise<ToolResponse<DeviceUsageReport>> {
+    const explicitDids = (input.dids || []).map((did) => did.trim()).filter(Boolean);
+    const query = input.query?.trim().toLowerCase() || '';
+    if (explicitDids.length === 0 && !query) {
+        return { success: false, error: '必须提供 dids 或 query 之一' };
+    }
+
+    try {
+        const deviceResponse = await gateway.callApi<DeviceListResponse>('getDevList', {}, 10000);
+        const devList = deviceResponse.devList || {};
+
+        const targets = new Map<string, { name: string; found: boolean }>();
+        for (const did of explicitDids) {
+            const device = devList[did];
+            targets.set(did, { name: device?.name || '(设备表中不存在)', found: Boolean(device) });
+        }
+        if (query) {
+            for (const [did, device] of Object.entries(devList)) {
+                const haystack = `${did} ${device.name} ${device.model} ${device.modelName} ${device.roomName}`.toLowerCase();
+                if (haystack.includes(query)) targets.set(did, { name: device.name, found: true });
+            }
+        }
+        if (targets.size === 0) {
+            return { success: false, error: `没有匹配 "${input.query}" 的设备，请改用 mijia_get_devices 确认名称` };
+        }
+
+        const graphList = await gateway.callApi<Array<{ id: string; enable?: boolean; userData?: { name?: string } }>>('getGraphList', {}, 10000);
+        const summaries = Array.isArray(graphList) ? graphList : [];
+
+        const hits = new Map<string, DeviceUsage>();
+        for (const [did, info] of targets) {
+            hits.set(did, { did, name: info.name, found: info.found, nodeCount: 0, graphs: [] });
+        }
+        const orphanGraphs = new Map<string, string[]>();
+        const unreadableGraphs: string[] = [];
+
+        for (const summary of summaries) {
+            const graphName = summary.userData?.name || summary.id;
+            let nodes: GraphNode[];
+            try {
+                const graph = await gateway.callApi<Graph>('getGraph', { id: summary.id }, 10000);
+                nodes = graph.nodes || [];
+            } catch {
+                unreadableGraphs.push(summary.id);
+                continue;
+            }
+
+            const perDevice = new Map<string, DeviceUsageNode[]>();
+            for (const node of nodes) {
+                const role = DEVICE_NODE_ROLES[node.type];
+                const did = node.props?.did;
+                if (!role || typeof did !== 'string') continue;
+                if (!devList[did] && !orphanGraphs.has(did)) orphanGraphs.set(did, []);
+                if (!devList[did]) {
+                    const list = orphanGraphs.get(did)!;
+                    if (!list.includes(graphName)) list.push(graphName);
+                }
+                if (!hits.has(did)) continue;
+                if (!perDevice.has(did)) perDevice.set(did, []);
+                perDevice.get(did)!.push({ nodeId: node.id, nodeType: node.type, role, target: nodeTarget(node.props) });
+            }
+
+            for (const [did, usageNodes] of perDevice) {
+                const usage = hits.get(did)!;
+                usage.nodeCount += usageNodes.length;
+                usage.graphs.push({ graphId: summary.id, name: graphName, enable: summary.enable ?? false, nodes: usageNodes });
+            }
+        }
+
+        return {
+            success: true,
+            data: {
+                devices: [...hits.values()].sort((a, b) => b.nodeCount - a.nodeCount),
+                orphans: [...orphanGraphs].map(([did, graphs]) => ({ did, graphs })),
+                scannedGraphs: summaries.length,
+                unreadableGraphs,
+            },
+        };
+    } catch (error) {
+        return { success: false, error: `扫描设备引用失败: ${error}` };
+    }
+}
+

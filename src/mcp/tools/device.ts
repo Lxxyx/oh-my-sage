@@ -5,13 +5,14 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { GatewayManager } from "../../core/gateway/manager.js";
-import { getDevices, getDevice } from "../../core/index.js";
+import { getDevices, getDevice, findDeviceUsage } from "../../core/index.js";
 import {
   ResponseFormatSchema,
   formatJson,
   handleError,
   formatDeviceListMarkdown,
   formatDeviceDetailsMarkdown,
+  formatDeviceUsageMarkdown,
 } from "../utils.js";
 
 export function registerDeviceTools(
@@ -145,6 +146,80 @@ Error Handling:
       } catch (error) {
         return {
           content: [{ type: "text", text: handleError(error, "get_device") }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ==================== mijia_find_device_usage ====================
+  server.registerTool(
+    "mijia_find_device_usage",
+    {
+      title: "查询设备被哪些自动化规则引用",
+      description: `一次扫描全部自动化规则，找出引用了指定设备的规则和节点。
+
+替代逐条 mijia_get_graph 翻查。更换、拆除、排查设备前先用本工具确认影响范围。
+
+Args:
+  - dids (string[], optional): 设备ID数组。已从网关删除的设备ID同样可查，用于排查残留引用
+  - query (string, optional): 名称/型号/房间/设备ID的模糊匹配，不区分大小写。型号同时匹配 model 串(如 linp-es5b)与中文型号名
+  - response_format (string, optional): 输出格式，默认 "markdown"
+  - dids 与 query 至少提供一个；两者同时提供时取并集
+
+Returns:
+  - devices: 每个设备命中的规则列表，含节点ID、节点类型、角色(trigger 触发 / read 读取 / write 控制)、siid/piid/eiid/aiid
+  - orphans: 规则引用了但网关设备表中已不存在的设备ID及其规则名，为空表示没有残留引用
+  - scannedGraphs: 本次扫描的规则总数
+  - unreadableGraphs: 读取失败的规则ID，非空说明这些规则的引用情况未确认
+
+Error Handling:
+  - "网关未连接" - 请先调用 mijia_auth
+  - "必须提供 dids 或 query 之一"
+  - query 无匹配时返回错误，请先用 mijia_get_devices 确认名称
+
+Note: 需要逐条拉取规则，规则较多时耗时数秒。`,
+      inputSchema: z.object({
+        dids: z.array(z.string()).optional().describe("设备ID数组"),
+        query: z.string().optional().describe("名称/型号/房间/设备ID模糊匹配"),
+        response_format: ResponseFormatSchema.optional().default("markdown").describe("输出格式"),
+      }),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ dids, query, response_format = "markdown" }) => {
+      try {
+        gatewayManager.ensureConnected();
+        const result = await findDeviceUsage(gatewayManager.gateway!, { dids, query });
+
+        if (!result.success) {
+          return {
+            content: [{ type: "text", text: handleError(new Error(result.error), "find_device_usage") }],
+            isError: true,
+          };
+        }
+
+        const report = result.data ?? { devices: [], orphans: [], scannedGraphs: 0, unreadableGraphs: [] };
+        const output = { ...report };
+
+        if (response_format === "json") {
+          return {
+            content: [{ type: "text", text: formatJson(output) }],
+            structuredContent: output,
+          };
+        }
+
+        return {
+          content: [{ type: "text", text: formatDeviceUsageMarkdown(report) }],
+          structuredContent: output,
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: handleError(error, "find_device_usage") }],
           isError: true,
         };
       }
