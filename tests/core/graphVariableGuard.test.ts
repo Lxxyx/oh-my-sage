@@ -266,6 +266,25 @@ test('更新规则未指定 enable 时保留禁用状态', async () => {
     assert.equal(saved?.cfg.enable, false);
 });
 
+test('仅传 layout 即可重新排版，保留业务图和禁用状态', async () => {
+    const nodes = [
+        { id: 'start', type: 'onLoad', cfg: { name: 'onLoad', version: 1, pos: { x: 100, y: 100, width: 528, height: 164 } }, props: {}, inputs: {}, outputs: { output: ['next.input'] } },
+        { id: 'next', type: 'delay', cfg: { name: 'delay', version: 1, pos: { x: 100, y: 100, width: 528, height: 164 } }, props: { timeout: 1000 }, inputs: { input: null }, outputs: { output: [] } },
+    ];
+    let saved: { nodes: typeof nodes; cfg: { enable: boolean } } | undefined;
+    const gateway = { async callApi(method: string, input: unknown): Promise<unknown> {
+        if (method === 'getGraph') return { id: '1', nodes: structuredClone(nodes), cfg: { enable: false } };
+        if (method === 'getGraphList') return [{ id: '1', enable: false, userData: { name: 'Layout' } }];
+        if (method === 'setGraph') saved = input as typeof saved;
+        return undefined;
+    } } as unknown as GatewayClient;
+    const result = await updateGraph(gateway, '1', { layout: { direction: 'DOWN' } });
+    assert.equal(result.success, true);
+    assert.equal(saved?.cfg.enable, false);
+    assert.deepEqual(saved?.nodes.map(n => [n.id, n.props, n.inputs, n.outputs]), nodes.map(n => [n.id, n.props, n.inputs, n.outputs]));
+    assert.ok(saved!.nodes[1].cfg.pos.y > saved!.nodes[0].cfg.pos.y + saved!.nodes[0].cfg.pos.height);
+});
+
 test('更新旧规则缺少 cfg 时从列表保留启用状态', async () => {
     let saved: { cfg: { enable: boolean } } | undefined;
     const gateway = {

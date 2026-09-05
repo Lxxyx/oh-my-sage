@@ -97,10 +97,11 @@ video → ui-sample → graph-diff → local-tested → gateway-roundtrip → ru
 }
 ```
 
-**节点位置自动布局**：create_graph 会根据节点连接关系自动计算位置，无需手动设置 `cfg.pos`。布局规则：
-- 从左到右表示流程方向
-- 分支节点上下排列
-- 节点尺寸：528×164
+**节点位置自动布局**：create_graph 和草稿提交会按卡片类型与连接关系自动计算位置，无需手动设置 `cfg.pos`。同一行从左到右推进，长流程按完整层向下折行；无关流程上下分区，备注保留尺寸。卡片尺寸不是固定 528×164。
+- 有关联的业务子流程可用 `cfg.layoutGroup` 标注分区名、`cfg.layoutOrder` 标注顺序，同组 `nop` 备注放在分区顶部。
+- 可选 `layout.direction` 为 `RIGHT`（默认）或 `DOWN`；`layout.maxRowWidth` 默认为 3600；`layout.nodeSizes` 接收网关页面实测尺寸。
+- 更新默认保留旧位置并让新增卡片避让；传 `layout: {}` 才重新排版全图。
+- 网关自行画线，不能保证任意图无交叉。应使用关闭副本并检查真实页面，参见 `docs/graph-layout.md`。
 
 ## 关键校验规则
 

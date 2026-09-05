@@ -27,6 +27,14 @@ test('复杂规则草稿分块追加并保留节点顺序', () => withStore((dra
     assert.deepEqual(drafts.status(id).nodeIds, ['a', 'b', 'c']);
 }));
 
+test('草稿恢复和提交保留自动布局选项', () => withStore((drafts, file) => {
+    const layout = { direction: 'DOWN' as const, maxRowWidth: 2400, nodeSizes: { a: { width: 800, height: 240 } } };
+    const id = drafts.begin({ name: 'layout', enable: false, layout });
+    drafts.append(id, [node('a')]);
+    const restored = new GraphDraftStore(file);
+    assert.deepEqual(restored.beginCommit(id).input?.layout, layout);
+}));
+
 test('并发进程共用草稿文件时不会互相覆盖', () => withStore((first, file) => {
     const second = new GraphDraftStore(file);
     const firstId = first.begin({ name: 'first' });

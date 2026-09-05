@@ -21,6 +21,7 @@ import {
   handleError,
   formatGraphListMarkdown,
 } from "../utils.js";
+import { GraphLayoutSchema } from "../../core/tools/layoutSchema.js";
 import { GraphDraftStore } from "./graphDraft.js";
 
 const GraphVariableSchema = z.discriminatedUnion("type", [
@@ -217,7 +218,7 @@ export function registerGraphTools(
 
 只有理解这些规则后才能正确构建 nodes 数组。小规则可直接使用本工具；超过 10 个节点的复杂规则应使用 graph_draft 工具分块上传，避免在上下文中重复传输完整节点图。
 
-系统会自动进行节点布局和连接完整性校验。
+系统会使用真实卡片尺寸估计、环路处理和交叉最小化自动布局。cfg.layoutGroup 可标注业务分区，cfg.layoutOrder 控制分区从上往下排列；同分区 nop 备注放在分区顶部。
 
 参数：
   - name (string): 规则名称
@@ -234,6 +235,7 @@ export function registerGraphTools(
       inputSchema: z.object({
         name: z.string().min(1).describe("规则名称"),
         nodes: z.array(z.any()).describe("节点列表"),
+        layout: GraphLayoutSchema.optional(),
         variables: z.array(GraphVariableSchema).optional().describe("本规则变量定义；节点引用时 scope 使用 rule"),
         enable: z.boolean().default(true).describe("是否启用，默认 true"),
       }),
@@ -244,10 +246,10 @@ export function registerGraphTools(
         openWorldHint: true,
       },
     },
-    async ({ name, nodes, variables, enable }) => {
+    async ({ name, nodes, variables, enable, layout }) => {
       try {
         gatewayManager.ensureConnected();
-        const result = await createGraph(gatewayManager.gateway!, { name, nodes, variables, enable });
+        const result = await createGraph(gatewayManager.gateway!, { name, nodes, variables, enable, layout });
 
         if (!result.success) {
           return {
@@ -278,14 +280,15 @@ export function registerGraphTools(
       description: "为复杂规则创建内存草稿。超过 10 个节点时优先使用：先开始草稿，再分块追加节点，最后仅用 draftId 提交。草稿 30 分钟后自动过期。",
       inputSchema: z.object({
         name: z.string().min(1).describe("规则名称"),
+        layout: GraphLayoutSchema.optional(),
         variables: z.array(GraphVariableSchema).optional().describe("本规则变量定义；节点引用时 scope 使用 rule"),
         enable: z.boolean().default(true).describe("创建后是否启用"),
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    async ({ name, variables, enable }) => {
+    async ({ name, variables, enable, layout }) => {
       try {
-        const draftId = drafts.begin({ name, variables, enable });
+        const draftId = drafts.begin({ name, variables, enable, layout });
         const output = { draftId, nodeCount: 0, message: "草稿已创建，请分块追加节点" };
         return { content: [{ type: "text", text: formatJson(output) }], structuredContent: { ...output } };
       } catch (error) {
@@ -426,11 +429,12 @@ export function registerGraphTools(
 返回：
   - success: 是否成功
   
-注意：更新 nodes 时会自动进行节点布局（保留原有位置信息）和连接完整性校验。`,
+注意：默认保留已有坐标，并为新增卡片避让；传 layout: {} 或 layout: {direction: "DOWN"} 可明确重新排版整张图。排版不会改变业务连线和启用状态。`,
       inputSchema: z.object({
         id: z.string().describe("规则ID"),
         name: z.string().optional().describe("新规则名称"),
         nodes: z.array(z.any()).optional().describe("新节点列表"),
+        layout: GraphLayoutSchema.optional(),
         enable: z.boolean().optional().describe("是否启用"),
       }),
       annotations: {
@@ -440,10 +444,10 @@ export function registerGraphTools(
         openWorldHint: true,
       },
     },
-    async ({ id, name, nodes, enable }) => {
+    async ({ id, name, nodes, enable, layout }) => {
       try {
         gatewayManager.ensureConnected();
-        const result = await updateGraph(gatewayManager.gateway!, id, { name, nodes, enable });
+        const result = await updateGraph(gatewayManager.gateway!, id, { name, nodes, enable, layout });
 
         if (!result.success) {
           return {

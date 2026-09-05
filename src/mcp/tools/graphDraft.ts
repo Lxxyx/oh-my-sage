@@ -122,6 +122,7 @@ export class GraphDraftStore {
                 nodes: clone(draft.nodes),
                 variables: clone(draft.variables),
                 enable: draft.enable,
+                layout: clone(draft.layout),
             },
         };
     }

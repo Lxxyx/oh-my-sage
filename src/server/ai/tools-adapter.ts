@@ -8,6 +8,7 @@ import {tool} from 'ai';
 import {jsonSchema, type Schema, zodSchema} from '@ai-sdk/ui-utils';
 import {GatewayClient} from '@/core';
 import {callGatewayApi, getDevices, getDevice, getGraphs, getGraph, createGraph, updateGraph, deleteGraph, toggleGraph, getVariables, setVariable, createVariable, deleteVariable, getVariableValue, getVariableConfig, validateGraph, validateGraphCapabilitiesWithGateway, layoutNodes} from '@/core';
+import {GraphLayoutSchema} from '@/core/tools/layoutSchema';
 import {getSkillByName, formatSkillContent, readSkillFile, getSkillCatalog} from '../skills/loader';
 
 function patchArrayItems(schema: unknown): unknown {
@@ -144,14 +145,15 @@ export function createCoreTools(gateway: GatewayClient) {
             parameters: z.object({
                 name: z.string().describe('规则名称'),
                 nodes: z.array(z.any()).describe('节点列表'),
+                layout: GraphLayoutSchema.optional(),
                 variables: z.array(z.discriminatedUnion('type', [
                     z.object({id: z.string().regex(/^[a-zA-Z0-9]+$/), type: z.literal('number'), value: z.number(), name: z.string().trim().min(1).optional()}),
                     z.object({id: z.string().regex(/^[a-zA-Z0-9]+$/), type: z.literal('string'), value: z.string(), name: z.string().trim().min(1).optional()}),
                 ])).optional().describe('本规则变量定义；节点引用时 scope 使用 rule'),
                 enable: z.boolean().optional().describe('是否启用'),
             }),
-            execute: async ({name, nodes, variables, enable = true}) => {
-                return createGraph(gateway, {name, nodes, variables, enable});
+            execute: async ({name, nodes, variables, enable = true, layout}) => {
+                return createGraph(gateway, {name, nodes, variables, enable, layout});
             },
         }),
 
@@ -161,10 +163,11 @@ export function createCoreTools(gateway: GatewayClient) {
                 id: z.string().describe('规则ID'),
                 name: z.string().optional().describe('新规则名称'),
                 nodes: z.array(z.any()).optional().describe('新节点列表'),
+                layout: GraphLayoutSchema.optional(),
                 enable: z.boolean().optional().describe('是否启用'),
             }),
-            execute: async ({id, name, nodes, enable}) => {
-                return updateGraph(gateway, id, {name, nodes, enable});
+            execute: async ({id, name, nodes, enable, layout}) => {
+                return updateGraph(gateway, id, {name, nodes, enable, layout});
             },
         }),
 

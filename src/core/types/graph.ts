@@ -2,6 +2,8 @@
  * Core - 规则类型定义
  */
 
+import type { GraphLayoutOptions } from '../tools/layout';
+
 /** 规则节点 */
 export interface GraphNode {
     id: string;
@@ -48,6 +50,7 @@ export interface GraphSummary {
 /** 创建规则输入 */
 export interface CreateGraphInput {
     graphId?: string;
+    layout?: GraphLayoutOptions;
     name: string;
     nodes: GraphNode[];
     enable?: boolean;
@@ -59,7 +62,7 @@ export interface CreateGraphInput {
     }>;
 }
 
-export type UpdateGraphInput = Partial<Pick<CreateGraphInput, 'name' | 'nodes' | 'enable'>>;
+export type UpdateGraphInput = Partial<Pick<CreateGraphInput, 'name' | 'nodes' | 'enable' | 'layout'>>;
 
 /** 校验错误 */
 export interface ValidationError {

@@ -8,6 +8,7 @@ import type { Graph, GraphNode, GraphSummary, CreateGraphInput, UpdateGraphInput
 import type { DeviceListResponse } from '../types/device';
 import type { ToolResponse } from '../types';
 import { validateGraph, layoutNodes } from './base';
+import { preserveNodePositions } from './layout';
 import { validateGraphCapabilitiesWithGateway } from './capabilityValidation';
 
 function nextGraphId(): string {
@@ -132,7 +133,7 @@ export async function createGraph(gateway: GatewayClient, input: CreateGraphInpu
             props: replaceRuleScope(node.props || {}, variableScope) as Record<string, unknown>,
         }));
 
-        layoutNodes(processedNodes);
+        await layoutNodes(processedNodes, input.layout);
 
         const graph = {
             id: graphId,
@@ -251,7 +252,7 @@ export async function updateGraph(gateway: GatewayClient, id: string, input: Upd
             props: node.props || {},
         }));
 
-        if (input.nodes) {
+        if (input.nodes || input.layout) {
             const existingPositions = new Map(existing.nodes.flatMap((node) => {
                 const pos = (node.cfg as Record<string, unknown>)?.pos;
                 return pos && typeof pos === 'object' ? [[node.id, pos] as const] : [];
@@ -261,11 +262,8 @@ export async function updateGraph(gateway: GatewayClient, id: string, input: Upd
                 const preserved = pos && typeof pos === 'object' ? pos : existingPositions.get(node.id);
                 return preserved ? [[node.id, preserved] as const] : [];
             }));
-            layoutNodes(processedNodes);
-            for (const node of processedNodes) {
-                const pos = positions.get(node.id);
-                if (pos) (node.cfg as Record<string, unknown>).pos = pos;
-            }
+            await layoutNodes(processedNodes, input.layout);
+            if (!input.layout) preserveNodePositions(processedNodes, positions);
         }
 
         const graph = {
@@ -283,7 +281,7 @@ export async function updateGraph(gateway: GatewayClient, id: string, input: Upd
             },
         };
 
-        if (input.nodes) {
+        if (input.nodes || input.layout) {
             const errors = validateGraph(graph);
             const errorList = errors.filter((e: { level: string }) => e.level === 'error');
             if (errorList.length > 0) {
