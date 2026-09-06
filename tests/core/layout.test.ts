@@ -3,6 +3,8 @@ import test from 'node:test';
 import type { GraphNode } from '../../src/core/types/graph';
 import { findNodeOverlaps, getNodeSize, layoutNodes, preserveNodePositions, type NodePosition } from '../../src/core/tools/layout';
 import { buildBlocks, graphEdges } from '../../src/core/tools/layoutModel';
+import { branchBands } from '../../src/core/tools/layoutBranches';
+import { measureLayoutQuality, portY } from '../../src/core/tools/layoutQuality';
 
 function node(id: string, type = 'delay', targets: string[] = []): GraphNode {
     return { id, type, cfg: {}, props: {}, inputs: { input: null }, outputs: { output: targets } };
@@ -36,18 +38,18 @@ test('真实尺寸估计覆盖设备查询和变量运算，尊重更大的卡�
     assert.deepEqual(getNodeSize(note, { width: 1300, height: 950 }), { width: 1300, height: 950 });
 });
 
-test('同构流程纵向对照，长备注放在侧边且不打断主线', async () => {
+test('独立流程上下分区，整图说明在上方且不打断主线', async () => {
     const nodes = [node('overview', 'nop'), node('a', 'onLoad', ['b.input']), node('b'), node('c', 'onLoad', ['d.input']), node('d')];
     nodes[0].cfg.pos = { x: -10, y: -100, width: 1200, height: 920 };
     const report = await layoutNodes(nodes);
     assert.equal(report.regions.length, 2);
-    assert.ok(pos(nodes[0]).x > report.regions[0].x + report.regions[0].width);
-    assert.equal(report.regions[0].y, 100);
+    assert.equal(pos(nodes[0]).y, 100);
+    assert.ok(report.regions[0].y >= pos(nodes[0]).y + pos(nodes[0]).height + 60);
     assert.ok(report.regions[1].y > report.regions[0].y + report.regions[0].height);
     assert.deepEqual(findNodeOverlaps(nodes), []);
 });
 
-test('分组提示不割裂连通流程，DOWN 保持纵向推进并保留元数据', async () => {
+test('显式分区及其备注一起排列，DOWN 保持区内纵向推进并保留元数据', async () => {
     const nodes = [node('a', 'onLoad', ['b.input']), node('b', 'delay', ['c.input']), node('c'), node('heading', 'nop')];
     nodes[0].cfg = { layoutGroup: 'first', layoutOrder: 1 };
     nodes[1].cfg = { layoutGroup: 'first', layoutOrder: 1 };
@@ -57,8 +59,9 @@ test('分组提示不割裂连通流程，DOWN 保持纵向推进并保留元数
     const report = await layoutNodes(nodes, { direction: 'DOWN' });
     assert.deepEqual(business(nodes), before);
     assert.ok(pos(nodes[1]).y > pos(nodes[0]).y);
-    assert.ok(pos(nodes[3]).x > pos(nodes[0]).x + pos(nodes[0]).width);
-    assert.equal(report.regions.length, 1);
+    assert.ok(pos(nodes[3]).x + pos(nodes[3]).width < pos(nodes[0]).x);
+    assert.equal(report.regions.length, 2);
+    assert.deepEqual(report.regions[0].noteIds, ['heading']);
     assert.ok(pos(nodes[2]).y > pos(nodes[1]).y + pos(nodes[1]).height);
     assert.deepEqual(report.overlaps, []);
 });
@@ -200,7 +203,7 @@ test('循环、确认和退出形成局部形状，初始化复位不反转成�
     assert.equal(pos(loop).x, pos(counter).x);
     assert.equal(pos(write).x, pos(delay).x);
     assert.equal(pos(delay).x, pos(verify).x);
-    assert.equal(pos(timer).x, pos(close).x);
+    assert.equal(pos(timer).x + pos(timer).width, pos(close).x + pos(close).width);
     assert.ok(pos(write).x > pos(gate).x);
     assert.ok(pos(mark).x > pos(verify).x);
     assert.ok(pos(owned).x > pos(mark).x);
@@ -208,13 +211,97 @@ test('循环、确认和退出形成局部形状，初始化复位不反转成�
     assert.deepEqual(business(nodes), before);
 });
 
-test('长动作列旁能填入多个短流程，孤立卡片不会堆成一条长列', async () => {
+test('长动作列和其他流程上下分区，孤立卡片仅在自己的区块内装箱', async () => {
     const actions = Array.from({ length: 10 }, (_, i) => node(`action${i}`, 'deviceOutput'));
     const nodes = [node('scene', 'onLoad', actions.map(n => `${n.id}.input`)), ...actions];
     for (let i = 0; i < 4; i++) nodes.push(node(`trigger${i}`, 'onLoad', [`delay${i}.input`]), node(`delay${i}`));
     for (let i = 0; i < 12; i++) nodes.push(node(`unused${i}`, 'deviceOutput'));
     const report = await layoutNodes(nodes);
-    assert.ok(report.regions.filter(r => r.y < 2300 && r.x > 100).length > 1);
-    assert.ok(Math.max(...nodes.map(n => pos(n).y + pos(n).height)) < 4000);
+    assert.equal(report.regions.length, 6);
+    for (let i = 1; i < report.regions.length; i++) assert.ok(report.regions[i].y >= report.regions[i - 1].y + report.regions[i - 1].height + 160);
+    const loose = report.regions.find(r => r.id === 'unconnected')!;
+    assert.equal(loose.nodeIds.length, 12);
+    assert.ok(loose.height < 1000);
+    assert.deepEqual(findNodeOverlaps(nodes, 40), []);
+});
+
+test('是分支整体在否分支上方，汇合点不强行归入任一分支', async () => {
+    const root = query('root');
+    root.outputs = { output2: ['no.input'], output: ['yes.input'] };
+    const nodes = [root, node('no', 'delay', ['no2.input']), node('join'), node('yes', 'deviceOutput', ['yes2.input']),
+        node('yes2', 'delay', ['join.input']), node('no2', 'delay', ['join.input'])];
+    const before = business(nodes);
+    assert.deepEqual(branchBands(nodes, graphEdges(nodes)), [{ upper: ['yes', 'yes2'], lower: ['no', 'no2'] }]);
+    await layoutNodes(nodes);
+    assert.ok(Math.max(...[nodes[3], nodes[4]].map(n => pos(n).y + pos(n).height)) + 40 <=
+        Math.min(...[nodes[1], nodes[5]].map(n => pos(n).y)));
+    assert.deepEqual(business(nodes), before);
+    const first = structuredClone(nodes);await layoutNodes(nodes);assert.deepEqual(nodes, first);
+});
+
+test('跨分区分支顺序优先于提示序号，备注始终位于自己的流程左侧', async () => {
+    const root = query('root');root.outputs = { output: ['yes.input'], output2: ['no.input'] };
+    const yes = node('yes');const no = node('no');const noteYes = node('noteYes', 'nop');const noteNo = node('noteNo', 'nop');
+    root.cfg = { layoutGroup: 'entry', layoutOrder: 0 };
+    for (const n of [yes, noteYes]) n.cfg = { layoutGroup: 'yes', layoutOrder: 9 };
+    for (const n of [no, noteNo]) n.cfg = { layoutGroup: 'no', layoutOrder: 1 };
+    const nodes = [root, no, noteNo, yes, noteYes];const before = business(nodes);
+    const report = await layoutNodes(nodes);
+    assert.deepEqual(report.regions.map(r => r.id), ['entry', 'yes', 'no']);
+    assert.ok(pos(yes).y + pos(yes).height < pos(no).y);
+    for (const [label, target] of [[noteYes, yes], [noteNo, no]]) {
+        assert.ok(pos(label).x + pos(label).width < pos(target).x);
+        const region = report.regions.find(r => r.nodeIds.includes(target.id))!;
+        assert.ok(pos(label).y >= region.y && pos(label).y + pos(label).height <= region.y + region.height);
+    }
+    assert.deepEqual(business(nodes), before);
+});
+
+test('无分区标记的就近备注跟随原来的流程，自动分区名称不覆盖显式分区', async () => {
+    const a = node('a', 'onLoad', ['b.input']);const b = node('b');
+    a.cfg.pos = { x: 1000, y: 2000, width: 160, height: 98 };b.cfg.pos = { x: 1300, y: 2000, width: 288, height: 112 };
+    const label = node('label', 'nop');label.cfg.pos = { x: 0, y: 2000, width: 800, height: 140 };
+    const explicit = node('explicit');explicit.cfg.layoutGroup = 'flow';
+    const isolated = node('isolated');isolated.cfg.layoutGroup = 'unconnected';
+    const nodes = [a, b, label, explicit, isolated, node('unused')];
+    const report = await layoutNodes(nodes);
+    assert.equal(report.regions.flatMap(r => r.nodeIds).length, 5);
+    assert.ok(report.regions.find(r => r.nodeIds.includes('a'))!.noteIds!.includes('label'));
+    assert.ok(pos(label).x + pos(label).width < pos(a).x);
+    const first = structuredClone(nodes);await layoutNodes(nodes);assert.deepEqual(nodes, first);
+});
+
+test('真实端口模型区分上下输出，检测穿过备注和第三张卡片的连线', () => {
+    const source = query('source');source.outputs = { output2: [], output: ['target.input'] };
+    assert.equal(portY(source, 'output', 'output', 120), 58);
+    assert.equal(portY(source, 'output2', 'output', 120), 98);
+    const event = node('event', 'deviceInput');event.props = { eiid: 1, arguments: [] };
+    assert.equal(getNodeSize(event).height, 204);
+    const target = node('target');const note = node('note', 'nop');const nodes = [source, target, note];
+    const positions = new Map<string, NodePosition>([
+        ['source', { x: 0, y: 0, width: 532, height: 120 }], ['target', { x: 1600, y: 0, width: 288, height: 112 }],
+        ['note', { x: 900, y: 0, width: 400, height: 140 }],
+    ]);
+    assert.deepEqual(measureLayoutQuality(nodes, graphEdges(nodes), positions).obstacles, [{ source: 'source', target: 'target', card: 'note' }]);
+    positions.get('note')!.y = 300;
+    assert.equal(measureLayoutQuality(nodes, graphEdges(nodes), positions).penetrations, 0);
+    assert.equal(measureLayoutQuality([], [], new Map()).width, 0);
+});
+
+test('两条分支确认相同属性时也不能合并并反转成功失败顺序', async () => {
+    const root = query('root');root.outputs = { output: ['yesWrite.input'], output2: ['noWrite.input'] };
+    const make = (prefix: string): GraphNode[] => {
+        const write = node(`${prefix}Write`, 'deviceOutput', [`${prefix}Delay.input`]);
+        write.props = { did: 'test', siid: 2, piid: 1, value: true };
+        const delay = node(`${prefix}Delay`, 'delay', [`${prefix}Verify.input`]);
+        const verify = node(`${prefix}Verify`, 'deviceGet');
+        verify.props = { did: 'test', siid: 2, piid: 1, operator: '=', v1: true };
+        return [write, delay, verify];
+    };
+    const no = make('no');const yes = make('yes');const nodes = [root, ...no, ...yes];
+    const blocks = buildBlocks(nodes, graphEdges(nodes), new Map(nodes.map(n => [n.id, getNodeSize(n)])));
+    assert.equal(blocks.filter(b => b.kind === 'verification').length, 2);
+    await layoutNodes(nodes);
+    assert.ok(Math.max(...yes.map(n => pos(n).y + pos(n).height)) + 40 <= Math.min(...no.map(n => pos(n).y)));
     assert.deepEqual(findNodeOverlaps(nodes, 40), []);
 });

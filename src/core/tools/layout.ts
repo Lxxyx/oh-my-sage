@@ -7,6 +7,8 @@ import type { ElkNode, ElkPort } from 'elkjs/lib/elk-api';
 import type { GraphNode } from '../types/graph';
 import { buildBlocks, COLUMN_GAP, connectedComponents, graphEdges, ROW_GAP,
     type LayoutBlock, type LayoutEdge } from './layoutModel';
+import { improvePortClearance, improveSectionClearance, improveRegionContents, improveNoteClearance, improveSectionSpacing, portY } from './layoutQuality';
+import { blockBranchBands, branchBands, enforceBranchOrder } from './layoutBranches';
 
 export interface NodeSize { width: number; height: number }
 export interface NodePosition extends NodeSize { x: number; y: number }
@@ -17,7 +19,7 @@ export interface GraphLayoutOptions {
     /** 网关页面实测尺寸优先于类型估计与历史占位。 */
     nodeSizes?: Record<string, NodeSize>;
 }
-export interface LayoutRegion extends NodePosition { id: string; nodeIds: string[] }
+export interface LayoutRegion extends NodePosition { id: string; nodeIds: string[]; noteIds?: string[] }
 export interface LayoutReport { regions: LayoutRegion[]; overlaps: Array<[string, string]> }
 
 const REGION_GAP = 160;
@@ -58,7 +60,7 @@ export function getNodeSize(node: GraphNode, measured?: NodeSize): NodeSize {
     if (node.type === 'deviceInput') {
         const event = props.eiid !== undefined;
         const args = Array.isArray(props.arguments) ? props.arguments : [];
-        size = event ? { width: args.length ? 436 : 280, height: args.length ? 204 + (args.length - 1) * 48 : 164 }
+        size = event ? { width: args.length ? 436 : 280, height: 204 + Math.max(0, args.length - 1) * 48 }
             : { width: 584, height: 206 };
     }
     if (node.type === 'deviceOutput') {
@@ -66,6 +68,8 @@ export function getNodeSize(node: GraphNode, measured?: NodeSize): NodeSize {
         const args = Array.isArray(props.ins) ? props.ins : [];
         size = action ? { width: args.length ? 684 : 280, height: 164 + Math.max(0, args.length - 1) * 40 }
             : { width: typeof props.value === 'boolean' ? 528 : 556, height: 164 };
+        // 枚举选择器与数值输入器宽度不同；图中已保存的这两种原生尺寸都有效。
+        if (!action && [528, 556].includes(old?.width || 0) && old?.height === 164) size.width = old!.width!;
     }
     if (['varSetNumber', 'varSetString'].includes(node.type)) {
         const elements = Array.isArray(props.elements) ? props.elements : [];
@@ -121,7 +125,7 @@ function blockPorts(block: LayoutBlock, direction: 'RIGHT' | 'DOWN'): ElkPort[] 
             const names = Object.keys((side === 'WEST' ? node.inputs : node.outputs) || {});
             return names.map((name, i) => ({ id: `${node.id}.${side}.${name}`, width: 0, height: 0,
                 x: direction === 'DOWN' ? pos.x + pos.width * (i + 1) / (names.length + 1) : pos.x + (side === 'WEST' ? 0 : pos.width),
-                y: direction === 'DOWN' ? pos.y + (side === 'WEST' ? 0 : pos.height) : pos.y + Math.min(pos.height - 20, 80 + i * 40),
+                y: direction === 'DOWN' ? pos.y + (side === 'WEST' ? 0 : pos.height) : pos.y + portY(node, name, side === 'WEST' ? 'input' : 'output', pos.height),
                 layoutOptions: { 'elk.port.side': direction === 'DOWN' ? side === 'WEST' ? 'NORTH' : 'SOUTH' : side },
             }));
         });
@@ -220,9 +224,16 @@ async function layoutComponent(nodes: GraphNode[], edges: LayoutEdge[], sizes: M
         if ((result.width || 0) > width * (options.maxRowWidth ? 1 : 2)) foldSimpleBridges(children, edges, owners, width);
     }
     const positions = new Map<string, NodePosition>();
+    if (direction === 'RIGHT') {
+        const rectangles = new Map(children.map(child => [child.id, { x: child.x || 0, y: child.y || 0,
+            width: child.width!, height: child.height! }]));
+        enforceBranchOrder(blockBranchBands(nodes, edges, blocks), rectangles);
+        for (const child of children) Object.assign(child, rectangles.get(child.id));
+    }
     for (const child of children) for (const [id, pos] of blocks.find(block => block.id === child.id)!.positions) {
         positions.set(id, { ...pos, x: (child.x || 0) + pos.x, y: (child.y || 0) + pos.y });
     }
+    if (direction === 'RIGHT') improvePortClearance(nodes, edges, blocks, positions);
     const box = bounds(positions.values());
     for (const [id, pos] of positions) positions.set(id, { ...pos, x: pos.x - box.x, y: pos.y - box.y });
     // 同构的独立配方保持相同行列（例如三个按键的照明档位）。值和设备 ID 不参与判断。
@@ -274,29 +285,115 @@ function packComponents(components: ComponentLayout[], positions: Map<string, No
     return regions;
 }
 
-/** 只修改坐标。备注置于旁边的说明列，不能让长说明打断执行主线或把复位挤到图尾。 */
+/** 流程分区绑定对应备注，整块向下展开；区块内部才做紧凑排版和端口避让。 */
 export async function layoutNodes(nodes: GraphNode[], options: GraphLayoutOptions = {}): Promise<LayoutReport> {
     if (new Set(nodes.map(n => n.id)).size !== nodes.length) throw new Error('布局失败：节点 ID 重复');
     const sizes = new Map(nodes.map(node => [node.id, getNodeSize(node, options.nodeSizes?.[node.id])]));
     const content = nodes.filter(node => node.type !== 'nop');
     const edges = graphEdges(content);
     const positions = new Map<string, NodePosition>();
-    const components: ComponentLayout[] = [];
-    for (const component of connectedComponents(content, edges)) {
-        const ids = new Set(component.map(node => node.id));
-        components.push(await layoutComponent(component, edges.filter(edge => ids.has(edge.source) && ids.has(edge.target)), sizes, options));
+    const groupName = (node: GraphNode): string | undefined => typeof node.cfg?.layoutGroup === 'string' && node.cfg.layoutGroup.trim() || undefined;
+    const groups = new Map<string, GraphNode[]>();
+    for (const node of content) {
+        const name = groupName(node);
+        if (!name) continue;
+        if (!groups.has(name)) groups.set(name, []);
+        groups.get(name)!.push(node);
     }
-    const regions = packComponents(components, positions, options);
-    const contentBox = bounds(positions.values());
+    const ungrouped = content.filter(n => !groupName(n));
+    const loose: GraphNode[] = [];
+    const uniqueGroup = (prefix: string): string => {
+        let id = prefix;let suffix = 1;
+        while (groups.has(id)) id = `${prefix}${suffix++}`;
+        return id;
+    };
+    for (const component of connectedComponents(ungrouped, edges.filter(e => ungrouped.some(n => n.id === e.source) && ungrouped.some(n => n.id === e.target)))) {
+        if (component.length === 1) loose.push(...component);
+        else groups.set(uniqueGroup('flow'), component);
+    }
+    if (loose.length) groups.set(uniqueGroup('unconnected'), loose);
+    const preferred = [...groups].sort((a, b) => {
+        const order = (ns: GraphNode[]): number => Math.min(...ns.map(n => typeof n.cfg.layoutOrder === 'number' ? n.cfg.layoutOrder : Infinity));
+        return order(a[1]) - order(b[1]);
+    });
+    const groupOf = new Map([...groups].flatMap(([id, members]) => members.map(n => [n.id, id] as const)));
+    const precedence = new Map([...groups.keys()].map(id => [id, new Set<string>()]));
+    for (const band of branchBands(content, edges)) {
+        const upper = new Set(band.upper.map(id => groupOf.get(id)!));
+        const lower = new Set(band.lower.map(id => groupOf.get(id)!));
+        for (const a of upper) for (const b of lower) if (!lower.has(a) && !upper.has(b)) precedence.get(b)!.add(a);
+    }
+    const ordered: typeof preferred = [];
+    const remaining = [...preferred];
+    while (remaining.length) {
+        const next = remaining.findIndex(([id]) => [...precedence.get(id)!].every(before => !remaining.some(([other]) => other === before)));
+        ordered.push(...remaining.splice(next >= 0 ? next : 0, 1));
+    }
     const notes = nodes.filter(node => node.type === 'nop').sort((a, b) => {
         const order = (n: GraphNode): number => typeof n.cfg.layoutOrder === 'number' ? n.cfg.layoutOrder : -1;
         return order(a) - order(b);
     });
-    let noteY = MARGIN;
-    const noteX = content.length ? contentBox.x + contentBox.width + REGION_GAP : MARGIN;
+    const noteGroups = new Map<string, string>();
     for (const note of notes) {
-        const size = sizes.get(note.id)!;
-        positions.set(note.id, { x: noteX, y: noteY, ...size });noteY += size.height + ROW_GAP;
+        const explicit = groupName(note);
+        if (explicit) { if (groups.has(explicit)) noteGroups.set(note.id, explicit);continue; }
+        // 已有显式分区说明时，未分组的说明保留为整图总览。
+        if (notes.some(other => groupName(other))) continue;
+        const old = note.cfg.pos as NodePosition | undefined;
+        if (!old || !Number.isFinite(old.x) || !Number.isFinite(old.y)) continue;
+        const boxes = [...groups].flatMap(([id, members]) => {
+            const saved = members.map(n => n.cfg.pos as NodePosition | undefined).filter((p): p is NodePosition =>
+                !!p && Number.isFinite(p.x) && Number.isFinite(p.y) && positive(p.width) && positive(p.height));
+            return saved.length ? [{ id, box: bounds(saved) }] : [];
+        });
+        // 位于所有流程上方的备注是总览；其他无标记备注沿用原图的空间邻近关系。
+        if (!boxes.length || old.y + sizes.get(note.id)!.height <= Math.min(...boxes.map(item => item.box.y))) continue;
+        const distance = (b: NodePosition): number => Math.hypot(Math.max(b.x - old.x - sizes.get(note.id)!.width, old.x - b.x - b.width, 0),
+            2 * Math.max(b.y - old.y - sizes.get(note.id)!.height, old.y - b.y - b.height, 0));
+        boxes.sort((a, b) => distance(a.box) - distance(b.box));noteGroups.set(note.id, boxes[0].id);
+    }
+    let top = MARGIN;
+    const putNotes = (list: GraphNode[]): void => {
+        for (const note of list) {
+            const size = sizes.get(note.id)!;
+            positions.set(note.id, { x: MARGIN, y: top, ...size });top += size.height + ROW_GAP;
+        }
+    };
+    putNotes(notes.filter(n => !noteGroups.has(n.id)));
+    const regions: LayoutRegion[] = [];
+    for (const [id, members] of ordered) {
+        const labels = notes.filter(n => noteGroups.get(n.id) === id);
+        const labelWidth = labels.length ? Math.max(...labels.map(n => sizes.get(n.id)!.width)) + REGION_GAP : 0;
+        const labelHeight = labels.reduce((sum, n) => sum + sizes.get(n.id)!.height + ROW_GAP, 0) - (labels.length ? ROW_GAP : 0);
+        let labelTop = top;
+        for (const label of labels) {
+            const size = sizes.get(label.id)!;
+            positions.set(label.id, { x: MARGIN, y: labelTop, ...size });labelTop += size.height + ROW_GAP;
+        }
+        const ids = new Set(members.map(n => n.id));
+        const internal = edges.filter(e => ids.has(e.source) && ids.has(e.target));
+        let component: ComponentLayout;
+        if (!internal.length && members.length > 1) {
+            const singles: ComponentLayout[] = [];
+            for (const member of members) singles.push(await layoutComponent([member], [], sizes, options));
+            const packed = new Map<string, NodePosition>();
+            packComponents(singles, packed, options);
+            const box = bounds(packed.values());
+            component = { nodes: members, signature: '', width: box.width, height: box.height,
+                positions: new Map([...packed].map(([id, p]) => [id, { ...p, x: p.x - box.x, y: p.y - box.y }])) };
+        } else component = await layoutComponent(members, internal, sizes, options);
+        for (const [nodeId, p] of component.positions) positions.set(nodeId, { ...p, x: p.x + MARGIN + labelWidth, y: p.y + top });
+        const height = Math.max(component.height, labelHeight);
+        regions.push({ id, nodeIds: members.map(n => n.id), noteIds: labels.map(n => n.id), x: MARGIN, y: top, width: component.width + labelWidth, height });
+        top += height + REGION_GAP * 2;
+    }
+    if (options.direction !== 'DOWN') {
+        improveSectionClearance(nodes, edges, regions, positions);
+        improveNoteClearance(nodes, edges, regions, positions);
+        improveSectionSpacing(nodes, edges, regions, positions);
+        improveRegionContents(nodes, edges, regions, positions);
+        improveSectionClearance(nodes, edges, regions, positions);
+        improveNoteClearance(nodes, edges, regions, positions);
     }
     // 完成后才写回，任何失败都不留下半张已改动的图。
     const candidate = nodes.map(node => ({ ...node, cfg: { ...node.cfg, pos: positions.get(node.id)! } }));

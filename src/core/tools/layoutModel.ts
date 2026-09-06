@@ -4,6 +4,7 @@
  */
 import type { GraphNode } from '../types/graph';
 import type { NodePosition, NodeSize } from './layout';
+import { branchBands } from './layoutBranches';
 
 export interface LayoutEdge {
     source: string;
@@ -130,8 +131,13 @@ export function buildBlocks(nodes: GraphNode[], edges: LayoutEdge[], sizes: Map<
     if (semantic) {
         const putColumn = (kind: LayoutBlock['kind'], members: GraphNode[]): void => {
             const positions = new Map<string, NodePosition>();
+            const width = Math.max(...members.map(n => sizes.get(n.id)!.width));
             let y = 0;
-            for (const member of members) { put(positions, member, 0, y);y += sizes.get(member.id)!.height + ROW_GAP; }
+            // 退出动作会向上回绕，右边界对齐后不会穿过同列更宽的状态查询卡片。
+            for (const member of members) {
+                put(positions, member, kind === 'cleanup' ? width - sizes.get(member.id)!.width : 0, y);
+                y += sizes.get(member.id)!.height + ROW_GAP;
+            }
             add(kind, members, positions);
         };
         // 循环与它自己的次数上限是一块控制单元，清零、停止线都在局部闭合。
@@ -262,5 +268,41 @@ export function buildBlocks(nodes: GraphNode[], edges: LayoutEdge[], sizes: Map<
     for (const node of nodes) if (!used.has(node.id)) {
         add('node', [node], new Map([[node.id, { x: 0, y: 0, ...sizes.get(node.id)! }]]));
     }
-    return blocks;
+    // 独立入口确认同一个动作时，共用执行列；避免仅因上游长度不同而错开整条支路。
+    const reachable = (a: LayoutBlock, b: LayoutBlock): boolean => {
+        const pending = a.nodes.map(n => n.id);const targets = new Set(b.nodes.map(n => n.id));const seen = new Set<string>();
+        while (pending.length) {
+            const id = pending.pop()!;
+            if (targets.has(id)) return true;
+            if (seen.has(id)) continue;
+            seen.add(id);pending.push(...edges.filter(e => e.source === id && (e.kind === 'flow' || e.kind === 'state')).map(e => e.target));
+        }
+        return false;
+    };
+    const merged = new Set<string>();
+    const branches = branchBands(nodes, edges);
+    const separateBranches = (a: LayoutBlock, b: LayoutBlock): boolean => branches.some(band =>
+        (a.nodes.some(n => band.upper.includes(n.id)) && b.nodes.some(n => band.lower.includes(n.id))) ||
+        (b.nodes.some(n => band.upper.includes(n.id)) && a.nodes.some(n => band.lower.includes(n.id))));
+    return blocks.flatMap(block => {
+        if (merged.has(block.id)) return [];
+        if (block.kind !== 'verification') return [block];
+        const key = (b: LayoutBlock): string => {
+            const p = b.nodes[0].props;return JSON.stringify([p.did, p.siid, p.piid, p.value]);
+        };
+        const peers = [block];
+        for (const other of blocks) if (other !== block && !merged.has(other.id) && other.kind === 'verification' && key(other) === key(block) &&
+            peers.every(peer => !reachable(peer, other) && !reachable(other, peer) && !separateBranches(peer, other))) peers.push(other);
+        if (peers.length === 1) return [block];
+        peers.sort((a, b) => Number(a.nodes[0].cfg.layoutOrder ?? 0) - Number(b.nodes[0].cfg.layoutOrder ?? 0));
+        const positions = new Map<string, NodePosition>();
+        let y = 0;
+        for (const peer of peers) {
+            merged.add(peer.id);
+            for (const [id, p] of peer.positions) positions.set(id, { ...p, y: p.y + y });
+            y += peer.height + ROW_GAP * 2;
+        }
+        return [{ ...block, nodes: peers.flatMap(p => p.nodes), positions,
+            width: Math.max(...peers.map(p => p.width)), height: y - ROW_GAP * 2 }];
+    });
 }

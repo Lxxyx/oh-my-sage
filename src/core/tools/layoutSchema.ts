@@ -7,4 +7,4 @@ export const GraphLayoutSchema = z.object({
         width: z.number().finite().positive(),
         height: z.number().finite().positive(),
     })).optional().describe('可选的网关页面实测卡片尺寸，以节点 ID 为键'),
-}).describe('按条件表、模式行、动作列和循环局部结构自动排版。更新时传 {} 重新排版；省略则保留已有坐标。cfg.layoutOrder 为独立流程排序提示，layoutGroup 元数据保留但不强制切断主线');
+}).describe('按独立流程上下分区，备注跟随对应区块，成功和失败分支遵循输出端口的上下顺序。区内识别条件表、模式行、动作列和循环；按网关端口曲线避让。更新时传 {} 重排，省略则保留坐标。cfg.layoutGroup 指定区块，layoutOrder 为排序提示，分支顺序优先');
